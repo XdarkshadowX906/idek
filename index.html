@@ -83,9 +83,12 @@ const G = 6.67430e-11;
 const METERS_PER_PIXEL = 1.0e6;
 const MAX_STEP_SECONDS = 900;
 const SOFTENING_METERS = 750;
-const MAX_TRAIL_POINTS = 160;
+const MAX_TRAIL_POINTS = 90;
 const MIN_FRAGMENT_RADIUS_M = 5.0e4;
-const MAX_FRAGMENTS = 7;
+const MAX_FRAGMENTS = 10;
+const MAX_BODIES = 160;
+const MAX_EFFECTS = 48;
+const COLLISION_CELL_SIZE_M = 8.0e6;
 const CREATE_MIN_RADIUS_M = 4.5e5;
 const CREATE_MAX_RADIUS_M = 3.2e6;
 const CREATE_RADIUS_RATE_MPS = 3.8e5;
@@ -191,6 +194,8 @@ function createBody(name, x, y, vx, vy, radius, materialType, isFragment = false
     isFragment,
     craters: [],
     trail: [],
+    lastTrailX: x,
+    lastTrailY: y,
     impactFlash: 0,
     selected: false
   };
@@ -277,6 +282,18 @@ function addCrater(body, dirX, dirY, severity) {
   body.impactFlash = 1;
 }
 
+function gravitationalBindingEnergyPerKg(body) {
+  // Uniform-sphere binding energy per unit mass: (3/5)GM/R.
+  return (3 / 5) * G * body.mass / Math.max(body.radius, 1);
+}
+
+function disruptionEnergyPerKg(body) {
+  // Q* approximation: material strength term plus self-gravity term. This is
+  // closer to asteroid/planet impact scaling than comparing total energy alone,
+  // while still cheap enough for a single-file browser sim.
+  return (body.materialStrength / body.density) + gravitationalBindingEnergyPerKg(body);
+}
+
 function computeAccelerations() {
   for (const body of bodies) {
     body.ax = 0;
@@ -325,13 +342,21 @@ function integrateLeapfrog(dt) {
 function resolveCollisions() {
   const removed = new Set();
   const additions = [];
+  const checkedPairs = new Set();
+  const grid = buildCollisionGrid();
 
   for (let i = 0; i < bodies.length; i++) {
     const a = bodies[i];
     if (removed.has(a)) continue;
-    for (let j = i + 1; j < bodies.length; j++) {
-      const b = bodies[j];
-      if (removed.has(b)) continue;
+    const nearby = nearbyCollisionCandidates(a, grid);
+    for (const b of nearby) {
+      if (a === b || removed.has(b)) continue;
+      const lowId = Math.min(a.id, b.id);
+      const highId = Math.max(a.id, b.id);
+      const pairKey = `${lowId}:${highId}`;
+      if (checkedPairs.has(pairKey)) continue;
+      checkedPairs.add(pairKey);
+
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const distance = Math.hypot(dx, dy);
@@ -347,7 +372,34 @@ function resolveCollisions() {
 
   bodies = bodies.filter((body) => !removed.has(body));
   bodies.push(...additions);
-  if (selectedBody && removed.has(selectedBody)) selectBody(null);
+  enforceBodyBudget();
+  if (selectedBody && !bodies.includes(selectedBody)) selectBody(null);
+}
+
+function buildCollisionGrid() {
+  const grid = new Map();
+  for (const body of bodies) {
+    const cellX = Math.floor(body.x / COLLISION_CELL_SIZE_M);
+    const cellY = Math.floor(body.y / COLLISION_CELL_SIZE_M);
+    const key = `${cellX}:${cellY}`;
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(body);
+  }
+  return grid;
+}
+
+function nearbyCollisionCandidates(body, grid) {
+  const candidates = [];
+  const cellX = Math.floor(body.x / COLLISION_CELL_SIZE_M);
+  const cellY = Math.floor(body.y / COLLISION_CELL_SIZE_M);
+  const reach = Math.max(1, Math.ceil(body.radius / COLLISION_CELL_SIZE_M) + 1);
+  for (let x = cellX - reach; x <= cellX + reach; x++) {
+    for (let y = cellY - reach; y <= cellY + reach; y++) {
+      const bucket = grid.get(`${x}:${y}`);
+      if (bucket) candidates.push(...bucket);
+    }
+  }
+  return candidates;
 }
 
 function solveCollision(a, b, distance, dx, dy) {
@@ -358,30 +410,46 @@ function solveCollision(a, b, distance, dx, dy) {
   const closingSpeed = Math.max(-(rvx * nx + rvy * ny), Math.hypot(rvx, rvy));
   const reducedMass = (a.mass * b.mass) / Math.max(a.mass + b.mass, 1);
   const energy = 0.5 * reducedMass * closingSpeed * closingSpeed;
-  const weakerStrength = Math.min(a.materialStrength, b.materialStrength);
-  const smallerRadius = Math.min(a.radius, b.radius);
-  const disruptionScale = weakerStrength * Math.PI * smallerRadius * smallerRadius * smallerRadius;
-  const severity = energy / Math.max(disruptionScale, 1);
+  const smaller = a.mass <= b.mass ? a : b;
+  const larger = smaller === a ? b : a;
+  const specificImpactEnergy = energy / Math.max(smaller.mass, 1);
+  const disruptionThreshold = disruptionEnergyPerKg(smaller);
+  const severity = specificImpactEnergy / Math.max(disruptionThreshold, 1);
+  const impactParameter = Math.abs((rvx * -ny) + (rvy * nx)) / Math.max(closingSpeed, 1);
   const result = {
     remove: [],
     add: [],
     x: (a.x + b.x) * 0.5,
     y: (a.y + b.y) * 0.5,
     energy,
-    severity
+    severity,
+    specificImpactEnergy,
+    disruptionThreshold
   };
 
-  if (severity < 0.18 || closingSpeed < 4) {
+  if (closingSpeed < 0.25 || severity < 0.08) {
     mergeBodies(a, b, result);
-  } else if (severity < 0.75) {
+  } else if (severity < 0.45 || impactParameter > 0.65) {
     craterImpact(a, b, nx, ny, severity, energy);
-  } else if (severity < 2.2) {
-    fragmentEjection(a, b, nx, ny, severity, energy, result);
+  } else if (severity < 1.6) {
+    fragmentEjection(a, b, nx, ny, severity, energy, result, smaller);
   } else {
-    catastrophicShatter(a, b, nx, ny, severity, energy, result);
+    catastrophicShatter(a, b, nx, ny, severity, energy, result, smaller, larger);
   }
 
   return result;
+}
+
+function enforceBodyBudget() {
+  if (bodies.length <= MAX_BODIES) return;
+  const protectedBodies = new Set(selectedBody ? [selectedBody] : []);
+  bodies.sort((a, b) => {
+    if (protectedBodies.has(a)) return -1;
+    if (protectedBodies.has(b)) return 1;
+    return b.mass - a.mass;
+  });
+  bodies = bodies.slice(0, MAX_BODIES);
+  if (selectedBody && !bodies.includes(selectedBody)) selectBody(null);
 }
 
 function mergeBodies(a, b, result) {
@@ -409,21 +477,21 @@ function craterImpact(a, b, nx, ny, severity, energy) {
   bounceBodies(a, b, nx, ny, 0.18);
 }
 
-function fragmentEjection(a, b, nx, ny, severity, energy, result) {
+function fragmentEjection(a, b, nx, ny, severity, energy, result, sourceOverride = null) {
   craterImpact(a, b, nx, ny, severity, energy);
-  const source = a.mass <= b.mass ? a : b;
-  const fragmentCount = clamp(Math.ceil(severity * 3), 2, MAX_FRAGMENTS);
-  const ejectedMassTotal = source.mass * clamp(0.03 + severity * 0.04, 0.04, 0.18);
+  const source = sourceOverride || (a.mass <= b.mass ? a : b);
+  const fragmentCount = clamp(Math.ceil(2 + severity * 2.5), 2, MAX_FRAGMENTS);
+  const ejectedMassTotal = source.mass * clamp(0.02 + severity * 0.06, 0.03, 0.22);
   source.mass -= ejectedMassTotal;
   source.radius = radiusFromMass(source.mass, source.density);
 
   for (let i = 0; i < fragmentCount; i++) {
-    const angle = Math.atan2(ny, nx) + randomRange(-0.9, 0.9) + Math.PI;
+    const angle = Math.atan2(ny, nx) + randomRange(-1.1, 1.1) + Math.PI;
     const dirX = Math.cos(angle);
     const dirY = Math.sin(angle);
     const fragmentMass = ejectedMassTotal / fragmentCount;
     const fragmentRadius = Math.max(radiusFromMass(fragmentMass, source.density), MIN_FRAGMENT_RADIUS_M);
-    const speed = Math.sqrt(Math.max((energy / Math.max(source.mass, 1)) * 0.02, 1));
+    const speed = Math.sqrt(Math.max(result.specificImpactEnergy * 0.06, 1));
     result.add.push(createFragment(
       source,
       source.x + dirX * (source.radius + fragmentRadius + 1),
@@ -436,16 +504,16 @@ function fragmentEjection(a, b, nx, ny, severity, energy, result) {
   }
 }
 
-function catastrophicShatter(a, b, nx, ny, severity, energy, result) {
-  const victim = a.mass <= b.mass ? a : b;
-  const survivor = victim === a ? b : a;
+function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverride = null, survivorOverride = null) {
+  const victim = victimOverride || (a.mass <= b.mass ? a : b);
+  const survivor = survivorOverride || (victim === a ? b : a);
   const normalSign = victim === a ? -1 : 1;
   addCrater(survivor, nx * normalSign, ny * normalSign, 1);
   addHeat(survivor, energy * 0.12);
   result.remove.push(victim);
 
-  const fragmentCount = clamp(Math.ceil(3 + severity), 4, MAX_FRAGMENTS);
-  const retainedMass = victim.mass * 0.18;
+  const fragmentCount = clamp(Math.ceil(4 + severity * 1.7), 4, MAX_FRAGMENTS);
+  const retainedMass = victim.mass * clamp(0.24 / Math.max(severity, 1), 0.04, 0.18);
   const fragmentMassTotal = victim.mass - retainedMass;
   for (let i = 0; i < fragmentCount; i++) {
     const angle = (Math.PI * 2 * i / fragmentCount) + randomRange(-0.28, 0.28);
@@ -453,7 +521,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result) {
     const dirY = Math.sin(angle);
     const fragmentMass = fragmentMassTotal / fragmentCount;
     const fragmentRadius = Math.max(radiusFromMass(fragmentMass, victim.density), MIN_FRAGMENT_RADIUS_M);
-    const speed = Math.sqrt(Math.max((energy / Math.max(victim.mass, 1)) * 0.08, 1));
+    const speed = Math.sqrt(Math.max(result.specificImpactEnergy * 0.16, 1));
     result.add.push(createFragment(
       victim,
       victim.x + dirX * (victim.radius + fragmentRadius),
@@ -494,13 +562,7 @@ function simulate(realDelta) {
     remaining -= step;
   }
 
-  for (const body of bodies) {
-    const last = body.trail[body.trail.length - 1];
-    if (!last || Math.hypot(last.x - body.x, last.y - body.y) > body.radius * 0.25) {
-      body.trail.push({ x: body.x, y: body.y });
-      while (body.trail.length > MAX_TRAIL_POINTS) body.trail.shift();
-    }
-  }
+  updateTrails();
 }
 
 function updateInput(delta) {
@@ -642,6 +704,7 @@ function spawnImpact(x, y, energy, severity) {
     life: lerp(0.35, 1.2, clamp(severity, 0, 1)),
     radius: lerp(18, 120, clamp(Math.log(Math.max(energy, 1)) / 35, 0, 1))
   });
+  while (effects.length > MAX_EFFECTS) effects.shift();
 }
 
 function drawEffects() {
@@ -690,8 +753,10 @@ function drawCreationPreview() {
 function updateHud() {
   statusEl.textContent = `${paused ? "Paused" : "Running"} | time scale ${timeScale.toFixed(1)}x | creating ${materials[createMaterial].label} | bodies ${bodies.length}`;
   if (!selectedBody) {
-    statsEl.textContent = "Selected body: none";
+    statsEl.textContent = "Selected body: none\nModel: N-body gravity + Q* impact approximation";
   } else {
+    const qStar = disruptionEnergyPerKg(selectedBody);
+    const binding = gravitationalBindingEnergyPerKg(selectedBody);
     statsEl.textContent = [
       `Selected: ${selectedBody.name} (#${selectedBody.id})`,
       `Material: ${selectedBody.materialType}${selectedBody.isFragment ? " fragment" : ""}`,
@@ -701,6 +766,8 @@ function updateHud() {
       `Speed: ${Math.hypot(selectedBody.vx, selectedBody.vy).toFixed(2)} m/s`,
       `Acceleration: ${Math.hypot(selectedBody.ax, selectedBody.ay).toExponential(3)} m/s^2`,
       `Temperature: ${selectedBody.temperature.toFixed(1)} K`,
+      `Q*: ${qStar.toExponential(3)} J/kg`,
+      `Binding: ${binding.toExponential(3)} J/kg`,
       `Craters: ${selectedBody.craters.length}`
     ].join("\n");
   }

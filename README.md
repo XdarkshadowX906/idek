@@ -2,6 +2,8 @@
 
 A self-contained realistic-feeling 2D celestial sandbox that runs in a web browser.
 
+The simulation now uses pairwise Newtonian gravity, leapfrog integration, spatial-hash collision broadphase, and impact outcomes based on specific impact energy versus a simple disruption threshold made from material strength plus gravitational binding energy. This is much more physically motivated than the first version, but it is not exact real-life destruction physics; exact planetary impact fracture requires specialized 3D continuum / hydrocode simulation, not a single browser file.
+
 ## How to use it
 
 Open `index.html` in Chrome, Edge, Firefox, or another modern browser.
