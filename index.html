@@ -718,20 +718,32 @@ function drawBody(body) {
   }
 
   if (body.impactFlash > 0) {
-    ctx.fillStyle = `rgba(255, 191, 80, ${body.impactFlash * 0.42})`;
+    ctx.fillStyle = `rgba(255, 139, 47, ${body.impactFlash * 0.32})`;
     ctx.beginPath();
-    ctx.arc(screen.x, screen.y, radius * (1 + body.impactFlash * 0.35), 0, Math.PI * 2);
+    ctx.arc(screen.x - radius * 0.18, screen.y - radius * 0.18, radius * 0.28, 0, Math.PI * 2);
     ctx.fill();
   }
 }
 
 function spawnImpact(x, y, energy, severity) {
+  const dust = [];
+  const dustCount = Math.round(lerp(3, 14, clamp(severity, 0, 1)));
+  for (let i = 0; i < dustCount; i++) {
+    const seed = x * 1e-7 + y * 3e-7 + i * 19.73;
+    dust.push({
+      angle: pseudoRandom(seed) * Math.PI * 2,
+      speed: lerp(10, 95, pseudoRandom(seed + 3.1)) * (0.35 + clamp(severity, 0, 1)),
+      length: lerp(8, 34, pseudoRandom(seed + 9.4))
+    });
+  }
   effects.push({
     x,
     y,
     age: 0,
-    life: lerp(0.35, 1.2, clamp(severity, 0, 1)),
-    radius: lerp(18, 120, clamp(Math.log(Math.max(energy, 1)) / 35, 0, 1))
+    life: lerp(0.45, 1.4, clamp(severity, 0, 1)),
+    heatRadius: lerp(5, 28, clamp(Math.log(Math.max(energy, 1)) / 35, 0, 1)),
+    severity: clamp(severity, 0, 1),
+    dust
   });
   while (effects.length > MAX_EFFECTS) effects.shift();
 }
@@ -740,22 +752,26 @@ function drawEffects() {
   for (const effect of effects) {
     const t = effect.age / effect.life;
     const screen = worldToScreen(effect.x / METERS_PER_PIXEL, effect.y / METERS_PER_PIXEL);
-    const radius = effect.radius * (0.35 + t);
     const alpha = 1 - t;
-    ctx.fillStyle = `rgba(255, 166, 64, ${alpha * 0.45})`;
+    // No expanding shockwave rings in vacuum; debris fragments carry the visible destruction.
+    ctx.fillStyle = `rgba(255, 119, 38, ${alpha * (0.25 + effect.severity * 0.35)})`;
     ctx.beginPath();
-    ctx.arc(screen.x, screen.y, 8 + radius * 0.1, 0, Math.PI * 2);
+    ctx.arc(screen.x, screen.y, effect.heatRadius * (1 + t * 0.35), 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = `rgba(255, 220, 96, ${alpha})`;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeStyle = `rgba(130, 190, 255, ${alpha * 0.55})`;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(screen.x, screen.y, radius * 1.45, 0, Math.PI * 2);
-    ctx.stroke();
+
+    ctx.lineWidth = 1;
+    for (const particle of effect.dust) {
+      const travel = particle.speed * t;
+      const x1 = screen.x + Math.cos(particle.angle) * travel;
+      const y1 = screen.y + Math.sin(particle.angle) * travel;
+      const x2 = screen.x + Math.cos(particle.angle) * (travel + particle.length * alpha);
+      const y2 = screen.y + Math.sin(particle.angle) * (travel + particle.length * alpha);
+      ctx.strokeStyle = `rgba(190, 150, 115, ${alpha * 0.5})`;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
   }
 }
 
