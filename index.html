@@ -133,7 +133,6 @@ const materialTypes = Object.keys(materials);
 
 let nextBodyId = 1;
 let bodies = [];
-let effects = [];
 let selectedBody = null;
 let paused = false;
 let followSelected = false;
@@ -213,7 +212,6 @@ function createBody(name, x, y, vx, vy, radius, materialType, isFragment = false
     trail: [],
     lastTrailX: x,
     lastTrailY: y,
-    impactFlash: 0,
     selected: false
   };
   if (addToWorld) bodies.push(body);
@@ -296,7 +294,6 @@ function addCrater(body, dirX, dirY, severity) {
     severity: Math.min(Math.max(severity, 0.05), 1)
   });
   while (body.craters.length > 18) body.craters.shift();
-  body.impactFlash = 1;
 }
 
 function gravitationalBindingEnergyPerKg(body) {
@@ -381,7 +378,6 @@ function resolveCollisions() {
         const result = solveCollision(a, b, distance || 1, dx, dy);
         for (const body of result.remove) removed.add(body);
         additions.push(...result.add);
-        spawnImpact(result.x, result.y, result.energy, result.severity);
         if (removed.has(a)) break;
       }
     }
@@ -616,12 +612,6 @@ function updateInput(delta) {
     pointer.createRadius = Math.min(pointer.createRadius + CREATE_RADIUS_RATE_MPS * delta, CREATE_MAX_RADIUS_M);
   }
 
-  for (const body of bodies) {
-    body.impactFlash = Math.max(body.impactFlash - delta * 2.8, 0);
-  }
-
-  for (const effect of effects) effect.age += delta;
-  effects = effects.filter((effect) => effect.age < effect.life);
 }
 
 function draw() {
@@ -630,7 +620,6 @@ function draw() {
 
   for (const body of bodies) drawTrail(body);
   for (const body of bodies) drawBody(body);
-  drawEffects();
   if (pointer.creating) drawCreationPreview();
   updateHud();
 }
@@ -733,50 +722,6 @@ function drawSelectionCorners(x, y, radius) {
   ctx.lineTo(x + gap, y + gap);
   ctx.lineTo(x + gap, y + gap - length);
   ctx.stroke();
-}
-
-function spawnImpact(x, y, energy, severity) {
-  const dust = [];
-  const dustCount = Math.round(lerp(3, 14, clamp(severity, 0, 1)));
-  for (let i = 0; i < dustCount; i++) {
-    const seed = x * 1e-7 + y * 3e-7 + i * 19.73;
-    dust.push({
-      angle: pseudoRandom(seed) * Math.PI * 2,
-      speed: lerp(10, 95, pseudoRandom(seed + 3.1)) * (0.35 + clamp(severity, 0, 1)),
-      length: lerp(8, 34, pseudoRandom(seed + 9.4))
-    });
-  }
-  effects.push({
-    x,
-    y,
-    age: 0,
-    life: lerp(0.45, 1.4, clamp(severity, 0, 1)),
-    severity: clamp(severity, 0, 1),
-    dust
-  });
-  while (effects.length > MAX_EFFECTS) effects.shift();
-}
-
-function drawEffects() {
-  for (const effect of effects) {
-    const t = effect.age / effect.life;
-    const screen = worldToScreen(effect.x / METERS_PER_PIXEL, effect.y / METERS_PER_PIXEL);
-    const alpha = 1 - t;
-    // No expanding shockwave rings or circular flashes in vacuum; fragments and ejecta carry the visible destruction.
-    ctx.lineWidth = 1;
-    for (const particle of effect.dust) {
-      const travel = particle.speed * t;
-      const x1 = screen.x + Math.cos(particle.angle) * travel;
-      const y1 = screen.y + Math.sin(particle.angle) * travel;
-      const x2 = screen.x + Math.cos(particle.angle) * (travel + particle.length * alpha);
-      const y2 = screen.y + Math.sin(particle.angle) * (travel + particle.length * alpha);
-      ctx.strokeStyle = `rgba(190, 150, 115, ${alpha * 0.5})`;
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-    }
-  }
 }
 
 function drawCreationPreview() {
@@ -994,7 +939,6 @@ function seedStartingBodies() {
 
 function loadEarthImpactScenario() {
   bodies = [];
-  effects = [];
   nextBodyId = 1;
   camera.x = 0;
   camera.y = 0;
