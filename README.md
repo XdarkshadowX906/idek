@@ -20,6 +20,7 @@ No install, build step, Godot editor, or web server is required.
 - Space: pause/resume
 - F: follow selected body
 - 1 / 2 / 3 / 4: time scale presets
+- 5: load an Earth analog hit by a 500 km rocky asteroid at about 20 km/s
 - [ / ]: slower/faster time scale
 - Tab: cycle creation material
 - Escape: clear selection
