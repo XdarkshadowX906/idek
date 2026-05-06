@@ -308,6 +308,18 @@ function createFragment(parent, x, y, vx, vy, radius, temperature) {
   return fragment;
 }
 
+function createFragmentFromMass(parent, name, x, y, vx, vy, mass, temperature) {
+  const radius = Math.max(radiusFromMass(mass, parent.density), MIN_FRAGMENT_RADIUS_M);
+  const fragment = createFragment(parent, x, y, vx, vy, radius, temperature);
+  fragment.name = name;
+  fragment.mass = mass;
+  fragment.radius = radius;
+  fragment.density = parent.density;
+  fragment.damage = Math.min(parent.damage + 0.35, 1);
+  fragment.shape = makeFragmentShape(fragment.id + Math.floor(mass % 997));
+  return fragment;
+}
+
 function screenToWorld(x, y) {
   return {
     x: camera.x + (x - window.innerWidth / 2) / camera.zoom,
@@ -489,7 +501,12 @@ function resolveCollisions() {
   bodies = bodies.filter((body) => !removed.has(body));
   bodies.push(...additions);
   enforceBodyBudget();
-  if (selectedBody && !bodies.includes(selectedBody)) selectBody(null);
+  if (selectedBody && !bodies.includes(selectedBody)) {
+    const largestNewBody = additions
+      .filter((body) => bodies.includes(body))
+      .sort((a, b) => b.mass - a.mass)[0] || null;
+    selectBody(largestNewBody);
+  }
 }
 
 function buildCollisionGrid() {
@@ -696,17 +713,49 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   addHeat(survivor, energy * 0.12);
   result.remove.push(victim);
 
-  const fragmentCount = clamp(Math.ceil(4 + severity * 1.7), 4, MAX_FRAGMENTS);
-  const retainedMass = victim.mass * clamp(0.24 / Math.max(severity, 1), 0.04, 0.18);
-  const fragmentMassTotal = victim.mass - retainedMass;
+  const immediateAccretionMass = victim.mass * clamp(0.04 / Math.max(severity, 1), 0.01, 0.06);
+  const remnantMassTotal = victim.mass * clamp(0.78 - severity * 0.06, 0.42, 0.78);
+  const ejectaMassTotal = Math.max(victim.mass - immediateAccretionMass - remnantMassTotal, 0);
   const localEscape = escapeSpeedFrom(survivor, survivor.radius + victim.radius);
-  for (let i = 0; i < fragmentCount; i++) {
-    const angle = Math.atan2(outward.y, outward.x) + randomRange(-0.9, 0.9);
+
+  const majorRemnantFractions = [0.45, 0.27, 0.16, 0.08];
+  const majorCount = severity > 3 ? 4 : 3;
+  let usedRemnantMass = 0;
+  for (let i = 0; i < majorCount; i++) {
+    const massFraction = majorRemnantFractions[i];
+    const remnantMass = remnantMassTotal * massFraction;
+    usedRemnantMass += remnantMass;
+    const angle = Math.atan2(outward.y, outward.x) + (i - (majorCount - 1) * 0.5) * 0.75 + randomRange(-0.18, 0.18);
     const dirX = Math.cos(angle);
     const dirY = Math.sin(angle);
-    const fragmentMass = fragmentMassTotal / fragmentCount;
+    const remnantRadius = Math.max(radiusFromMass(remnantMass, victim.density), MIN_FRAGMENT_RADIUS_M * 1.8);
+    const speed = localEscape * (0.12 + 0.18 * pseudoRandom(victim.id * 31.7 + i));
+    const remnant = createFragmentFromMass(
+      victim,
+      victim.x + dirX * (victim.radius * 0.45 + remnantRadius),
+      victim.y + dirY * (victim.radius * 0.45 + remnantRadius),
+      victim.vx + dirX * speed,
+      victim.vy + dirY * speed,
+      remnantMass,
+      victim.temperature + 140,
+      `remnant ${i + 1}`
+    );
+    remnant.radius = remnantRadius;
+    remnant.damage = Math.min(victim.damage + 0.55, 1);
+    result.add.push(remnant);
+  }
+
+  const leftoverRemnantMass = Math.max(remnantMassTotal - usedRemnantMass, 0);
+  const smallEjectaMassTotal = ejectaMassTotal + leftoverRemnantMass;
+  const ejectaCount = clamp(Math.ceil(3 + severity), 3, MAX_FRAGMENTS);
+  for (let i = 0; i < ejectaCount; i++) {
+    const angle = Math.atan2(outward.y, outward.x) + randomRange(-1.15, 1.15);
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
+    const fragmentMass = smallEjectaMassTotal / ejectaCount;
+    if (fragmentMass <= 0) continue;
     const fragmentRadius = Math.max(radiusFromMass(fragmentMass, victim.density), MIN_FRAGMENT_RADIUS_M);
-    const escapeFraction = 0.45 + 0.55 * pseudoRandom(victim.id * 23.7 + i);
+    const escapeFraction = 0.35 + 0.45 * pseudoRandom(victim.id * 23.7 + i);
     const severeEscapeBoost = severity > 3 ? clamp((severity - 3) * 0.12, 0, 0.45) : 0;
     const speed = localEscape * Math.min(escapeFraction + severeEscapeBoost, 1.35);
     result.add.push(createFragment(
@@ -720,9 +769,9 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
     ));
   }
 
-  const totalMass = survivor.mass + retainedMass;
-  survivor.vx = (survivor.vx * survivor.mass + victim.vx * retainedMass) / totalMass;
-  survivor.vy = (survivor.vy * survivor.mass + victim.vy * retainedMass) / totalMass;
+  const totalMass = survivor.mass + immediateAccretionMass;
+  survivor.vx = (survivor.vx * survivor.mass + victim.vx * immediateAccretionMass) / totalMass;
+  survivor.vy = (survivor.vy * survivor.mass + victim.vy * immediateAccretionMass) / totalMass;
   survivor.mass = totalMass;
   survivor.radius = radiusFromMass(survivor.mass, survivor.density);
 }
