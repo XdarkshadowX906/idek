@@ -59,6 +59,22 @@
     #controls {
       color: #aeb8d7;
     }
+
+    #error {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      max-width: min(520px, calc(100vw - 24px));
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 110, 110, 0.5);
+      border-radius: 10px;
+      background: rgba(40, 5, 8, 0.9);
+      color: #ffd7d7;
+      font: 12px/1.35 monospace;
+      white-space: pre-wrap;
+      display: none;
+      z-index: 2;
+    }
   </style>
 </head>
 <body>
@@ -69,6 +85,7 @@
   <div id="stats"></div>
   <div id="controls"></div>
 </section>
+<pre id="error"></pre>
 
 <script>
 "use strict";
@@ -78,6 +95,7 @@ const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const statsEl = document.getElementById("stats");
 const controlsEl = document.getElementById("controls");
+const errorEl = document.getElementById("error");
 
 const G = 6.67430e-11;
 const C = 299792458;
@@ -155,6 +173,8 @@ let timeScale = 3600;
 let createMaterial = "rocky";
 let createKind = "planet";
 let lastFrameSeconds = performance.now() / 1000;
+let runtimeError = null;
+let runtimeErrorMessage = "";
 
 const camera = {
   x: 0,
@@ -780,9 +800,35 @@ function draw() {
   drawBackground();
 
   for (const body of bodies) drawTrail(body);
-  for (const body of bodies) drawBody(body);
+  for (const body of bodies) {
+    try {
+      drawBody(body);
+    } catch (error) {
+      body.drawError = String(error && error.message ? error.message : error);
+    }
+  }
   if (pointer.creating) drawCreationPreview();
   updateHud();
+  if (runtimeError) drawRuntimeError();
+}
+
+function reportRuntimeError(error) {
+  runtimeError = error;
+  runtimeErrorMessage = String(error && error.stack ? error.stack : error);
+  statusEl.textContent = "Runtime error - see screen";
+  controlsEl.textContent = runtimeErrorMessage;
+}
+
+function drawRuntimeError() {
+  ctx.fillStyle = "rgba(10, 5, 5, 0.88)";
+  ctx.fillRect(20, window.innerHeight - 150, Math.min(window.innerWidth - 40, 820), 130);
+  ctx.fillStyle = "#ffb0a0";
+  ctx.font = "14px monospace";
+  ctx.fillText("Simulation error:", 34, window.innerHeight - 118);
+  const lines = runtimeErrorMessage.split("\n").slice(0, 5);
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i].slice(0, 110), 34, window.innerHeight - 94 + i * 18);
+  }
 }
 
 function drawBackground() {
@@ -948,13 +994,28 @@ function drawBlackHoleBody(x, y, radius, body) {
   ctx.strokeStyle = "rgba(255, 180, 80, 0.55)";
   ctx.lineWidth = Math.max(1, horizon * 0.18);
   ctx.beginPath();
-  ctx.ellipse(x, y, horizon * 2.8, horizon * 0.75, body.angle * 0.3, 0, Math.PI * 2);
+  drawTiltedEllipsePath(x, y, horizon * 2.8, horizon * 0.75, body.angle * 0.3);
   ctx.stroke();
 
   ctx.fillStyle = "black";
   ctx.beginPath();
   ctx.arc(x, y, horizon, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawTiltedEllipsePath(x, y, radiusX, radiusY, rotation) {
+  const steps = 80;
+  const cosR = Math.cos(rotation);
+  const sinR = Math.sin(rotation);
+  for (let i = 0; i <= steps; i++) {
+    const angle = (Math.PI * 2 * i) / steps;
+    const localX = Math.cos(angle) * radiusX;
+    const localY = Math.sin(angle) * radiusY;
+    const px = x + localX * cosR - localY * sinR;
+    const py = y + localX * sinR + localY * cosR;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
 }
 
 function drawWhiteHoleBody(x, y, radius, body) {
@@ -1089,12 +1150,22 @@ function updateHud() {
 }
 
 function frame(nowMs) {
-  const nowSeconds = nowMs / 1000;
-  const delta = Math.min(nowSeconds - lastFrameSeconds, 0.05);
-  lastFrameSeconds = nowSeconds;
-  updateInput(delta);
-  simulate(delta);
-  draw();
+  try {
+    const nowSeconds = nowMs / 1000;
+    const delta = Math.min(nowSeconds - lastFrameSeconds, 0.05);
+    lastFrameSeconds = nowSeconds;
+    updateInput(delta);
+    simulate(delta);
+    draw();
+  } catch (error) {
+    reportRuntimeError(error);
+    try {
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      drawRuntimeError();
+    } catch (_drawError) {
+      // If even canvas drawing fails, keep the textual HUD error visible.
+    }
+  }
   requestAnimationFrame(frame);
 }
 
@@ -1116,7 +1187,9 @@ canvas.addEventListener("pointermove", (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  canvas.setPointerCapture(event.pointerId);
+  if (canvas.setPointerCapture && event.pointerId !== undefined) {
+    canvas.setPointerCapture(event.pointerId);
+  }
   pointer.x = event.clientX;
   pointer.y = event.clientY;
   const world = screenToWorld(pointer.x, pointer.y);
@@ -1294,9 +1367,15 @@ function loadEarthImpactScenario() {
   selectBody(earth);
 }
 
-resizeCanvas();
-seedStartingBodies();
-requestAnimationFrame(frame);
+try {
+  resizeCanvas();
+  seedStartingBodies();
+  draw();
+  requestAnimationFrame(frame);
+} catch (error) {
+  reportRuntimeError(error);
+  drawRuntimeError();
+}
 </script>
 </body>
 </html>
