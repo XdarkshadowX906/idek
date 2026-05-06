@@ -210,6 +210,10 @@ function gravityMass(body) {
   return body.kind === "white_hole" ? -body.mass : body.mass;
 }
 
+function kindLabel(kind) {
+  return String(kind || "planet").replace("_", " ");
+}
+
 function makeFragmentShape(seed) {
   const points = [];
   const count = 7 + (seed % 4);
