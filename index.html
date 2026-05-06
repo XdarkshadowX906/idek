@@ -90,7 +90,6 @@ const MAX_BODIES = 160;
 const COLLISION_CELL_SIZE_M = 8.0e6;
 const FRAGMENT_REACCRETION_MASS_RATIO = 25;
 const CREATE_MIN_RADIUS_M = 4.5e5;
-const CREATE_MAX_RADIUS_M = 3.2e6;
 const CREATE_RADIUS_RATE_MPS = 3.8e5;
 const VELOCITY_DRAG_SCALE = 30;
 const KEYBOARD_PAN_SPEED = 520;
@@ -218,6 +217,7 @@ function createBody(name, x, y, vx, vy, radius, materialType, isFragment = false
     materialStrength: material.strength,
     heatCapacity: material.heatCapacity,
     temperature: 285,
+    damage: 0,
     isFragment,
     craters: [],
     trail: [],
@@ -235,6 +235,7 @@ function createBody(name, x, y, vx, vy, radius, materialType, isFragment = false
 function createFragment(parent, x, y, vx, vy, radius, temperature) {
   const fragment = createBody(`${parent.name} fragment`, x, y, vx, vy, radius, parent.materialType, true, false);
   fragment.temperature = temperature;
+  fragment.damage = Math.min(parent.damage + 0.2, 1);
   fragment.craters = parent.craters.slice(-4);
   return fragment;
 }
@@ -302,11 +303,13 @@ function addHeat(body, energyJoules) {
 
 function addCrater(body, dirX, dirY, severity) {
   const length = Math.hypot(dirX, dirY) || 1;
+  const clampedSeverity = Math.min(Math.max(severity, 0.05), 1);
   body.craters.push({
     x: dirX / length,
     y: dirY / length,
-    severity: Math.min(Math.max(severity, 0.05), 1)
+    severity: clampedSeverity
   });
+  body.damage = clamp((body.damage || 0) + clampedSeverity * 0.08, 0, 0.95);
   while (body.craters.length > 18) body.craters.shift();
 }
 
@@ -667,7 +670,7 @@ function updateInput(delta) {
   }
 
   if (pointer.creating) {
-    pointer.createRadius = Math.min(pointer.createRadius + CREATE_RADIUS_RATE_MPS * delta, CREATE_MAX_RADIUS_M);
+    pointer.createRadius += Math.max(CREATE_RADIUS_RATE_MPS, pointer.createRadius * 0.35) * delta;
   }
 
 }
@@ -725,9 +728,11 @@ function drawBody(body) {
   const screen = worldToScreen(body.x / METERS_PER_PIXEL, body.y / METERS_PER_PIXEL);
   const radius = renderRadius(body);
   const heat = clamp((body.temperature - 900) / 1800, 0, 1);
-  const base = mixColor(material.color, [255, 88, 16], heat);
-  const dark = mixColor(base, [0, 0, 0], 0.35);
-  const light = mixColor(base, [255, 255, 255], 0.45);
+  const damageDarkening = clamp(body.damage || 0, 0, 1);
+  const damagedColor = mixColor(material.color, [36, 32, 29], damageDarkening * 0.72);
+  const base = mixColor(damagedColor, [255, 88, 16], heat);
+  const dark = mixColor(base, [0, 0, 0], 0.35 + damageDarkening * 0.22);
+  const light = mixColor(base, [255, 255, 255], 0.45 * (1 - damageDarkening * 0.65));
 
   if (body.isFragment) {
     drawFragmentBody(body, screen.x, screen.y, radius, base, dark);
@@ -858,6 +863,7 @@ function updateHud() {
       `Speed: ${Math.hypot(selectedBody.vx, selectedBody.vy).toFixed(2)} m/s`,
       `Acceleration: ${Math.hypot(selectedBody.ax, selectedBody.ay).toExponential(3)} m/s^2`,
       `Temperature: ${selectedBody.temperature.toFixed(1)} K`,
+      `Global damage: ${(selectedBody.damage * 100).toFixed(1)}%`,
       `Q*: ${qStar.toExponential(3)} J/kg`,
       `Binding: ${binding.toExponential(3)} J/kg`,
       `Craters: ${selectedBody.craters.length}`

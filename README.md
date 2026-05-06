@@ -15,7 +15,7 @@ No install, build step, Godot editor, or web server is required.
 ## Controls
 
 - Left click a body: select it
-- Left click empty space, hold, drag, release: create a body and set its launch velocity
+- Left click empty space, hold, drag, release: create a body and set its launch velocity. Creation radius has no hard maximum; the longer you hold, the larger the planet gets.
 - Mouse wheel: zoom
 - Middle mouse drag or right mouse drag: pan
 - WASD or arrow keys: pan
