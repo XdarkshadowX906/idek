@@ -87,8 +87,8 @@ const MAX_TRAIL_POINTS = 90;
 const MIN_FRAGMENT_RADIUS_M = 5.0e4;
 const MAX_FRAGMENTS = 10;
 const MAX_BODIES = 160;
-const MAX_EFFECTS = 48;
 const COLLISION_CELL_SIZE_M = 8.0e6;
+const FRAGMENT_REACCRETION_MASS_RATIO = 25;
 const CREATE_MIN_RADIUS_M = 4.5e5;
 const CREATE_MAX_RADIUS_M = 3.2e6;
 const CREATE_RADIUS_RATE_MPS = 3.8e5;
@@ -182,6 +182,17 @@ function radiusFromMass(mass, density) {
   return Math.pow((3 * mass) / (4 * Math.PI * density), 1 / 3);
 }
 
+function makeFragmentShape(seed) {
+  const points = [];
+  const count = 7 + (seed % 4);
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count;
+    const roughness = 0.68 + pseudoRandom(seed * 12.73 + i * 4.91) * 0.54;
+    points.push({ angle, roughness });
+  }
+  return points;
+}
+
 function createBodyFromMass(name, x, y, vx, vy, mass, radius, materialType, density, isFragment = false) {
   const body = createBody(name, x, y, vx, vy, radius, materialType, isFragment);
   body.mass = mass;
@@ -212,6 +223,9 @@ function createBody(name, x, y, vx, vy, radius, materialType, isFragment = false
     trail: [],
     lastTrailX: x,
     lastTrailY: y,
+    shape: isFragment ? makeFragmentShape(nextBodyId) : null,
+    spin: isFragment ? randomRange(-0.7, 0.7) : 0,
+    angle: isFragment ? randomRange(0, Math.PI * 2) : 0,
     selected: false
   };
   if (addToWorld) bodies.push(body);
@@ -299,6 +313,18 @@ function addCrater(body, dirX, dirY, severity) {
 function gravitationalBindingEnergyPerKg(body) {
   // Uniform-sphere binding energy per unit mass: (3/5)GM/R.
   return (3 / 5) * G * body.mass / Math.max(body.radius, 1);
+}
+
+function escapeSpeedFrom(body, distance) {
+  return Math.sqrt((2 * G * body.mass) / Math.max(distance, body.radius, 1));
+}
+
+function outwardFrom(centerBody, ejectaBody, fallbackX, fallbackY) {
+  const dx = ejectaBody.x - centerBody.x;
+  const dy = ejectaBody.y - centerBody.y;
+  const length = Math.hypot(dx, dy);
+  if (length > 0) return { x: dx / length, y: dy / length };
+  return { x: fallbackX, y: fallbackY };
 }
 
 function disruptionEnergyPerKg(body) {
@@ -440,6 +466,11 @@ function solveCollision(a, b, distance, dx, dy) {
     disruptionThreshold
   };
 
+  if (smaller.isFragment && larger.mass > smaller.mass * FRAGMENT_REACCRETION_MASS_RATIO) {
+    fallbackFragmentImpact(larger, smaller, nx, ny, energy, severity, result);
+    return result;
+  }
+
   if (closingSpeed < 0.25 || severity < 0.08) {
     mergeBodies(a, b, result);
   } else if (severity < 0.45 || impactParameter > 0.65) {
@@ -490,27 +521,44 @@ function craterImpact(a, b, nx, ny, severity, energy) {
   bounceBodies(a, b, nx, ny, 0.18);
 }
 
+function fallbackFragmentImpact(planet, fragment, nx, ny, energy, severity, result) {
+  const dirX = fragment.x - planet.x;
+  const dirY = fragment.y - planet.y;
+  const totalMass = planet.mass + fragment.mass;
+  addCrater(planet, dirX, dirY, clamp(severity, 0.08, 1));
+  addHeat(planet, energy * 0.18);
+  planet.vx = (planet.vx * planet.mass + fragment.vx * fragment.mass) / totalMass;
+  planet.vy = (planet.vy * planet.mass + fragment.vy * fragment.mass) / totalMass;
+  planet.mass = totalMass;
+  planet.radius = radiusFromMass(planet.mass, planet.density);
+  result.remove.push(fragment);
+}
+
 function fragmentEjection(a, b, nx, ny, severity, energy, result, sourceOverride = null) {
   craterImpact(a, b, nx, ny, severity, energy);
   const source = sourceOverride || (a.mass <= b.mass ? a : b);
-  const fragmentCount = clamp(Math.ceil(2 + severity * 2.5), 2, MAX_FRAGMENTS);
-  const ejectedMassTotal = source.mass * clamp(0.02 + severity * 0.06, 0.03, 0.22);
+  const target = source === a ? b : a;
+  const outward = outwardFrom(target, source, nx, ny);
+  const fragmentCount = clamp(Math.ceil(2 + severity * 2.2), 2, MAX_FRAGMENTS);
+  const ejectedMassTotal = source.mass * clamp(0.02 + severity * 0.05, 0.03, 0.18);
+  const localEscape = escapeSpeedFrom(target, target.radius + source.radius);
   source.mass -= ejectedMassTotal;
   source.radius = radiusFromMass(source.mass, source.density);
 
   for (let i = 0; i < fragmentCount; i++) {
-    const angle = Math.atan2(ny, nx) + randomRange(-1.1, 1.1) + Math.PI;
+    const angle = Math.atan2(outward.y, outward.x) + randomRange(-0.55, 0.55);
     const dirX = Math.cos(angle);
     const dirY = Math.sin(angle);
     const fragmentMass = ejectedMassTotal / fragmentCount;
     const fragmentRadius = Math.max(radiusFromMass(fragmentMass, source.density), MIN_FRAGMENT_RADIUS_M);
-    const speed = Math.sqrt(Math.max(result.specificImpactEnergy * 0.06, 1));
+    // Most ejecta is launched below escape speed, so it falls back instead of orbiting forever.
+    const speed = localEscape * (0.28 + 0.42 * pseudoRandom(source.id * 17.3 + i));
     result.add.push(createFragment(
       source,
       source.x + dirX * (source.radius + fragmentRadius + 1),
       source.y + dirY * (source.radius + fragmentRadius + 1),
-      source.vx + dirX * speed,
-      source.vy + dirY * speed,
+      target.vx + dirX * speed,
+      target.vy + dirY * speed,
       fragmentRadius,
       source.temperature + 80
     ));
@@ -520,21 +568,24 @@ function fragmentEjection(a, b, nx, ny, severity, energy, result, sourceOverride
 function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverride = null, survivorOverride = null) {
   const victim = victimOverride || (a.mass <= b.mass ? a : b);
   const survivor = survivorOverride || (victim === a ? b : a);
-  const normalSign = victim === a ? -1 : 1;
-  addCrater(survivor, nx * normalSign, ny * normalSign, 1);
+  const outward = outwardFrom(survivor, victim, nx, ny);
+  addCrater(survivor, -outward.x, -outward.y, 1);
   addHeat(survivor, energy * 0.12);
   result.remove.push(victim);
 
   const fragmentCount = clamp(Math.ceil(4 + severity * 1.7), 4, MAX_FRAGMENTS);
   const retainedMass = victim.mass * clamp(0.24 / Math.max(severity, 1), 0.04, 0.18);
   const fragmentMassTotal = victim.mass - retainedMass;
+  const localEscape = escapeSpeedFrom(survivor, survivor.radius + victim.radius);
   for (let i = 0; i < fragmentCount; i++) {
-    const angle = (Math.PI * 2 * i / fragmentCount) + randomRange(-0.28, 0.28);
+    const angle = Math.atan2(outward.y, outward.x) + randomRange(-0.9, 0.9);
     const dirX = Math.cos(angle);
     const dirY = Math.sin(angle);
     const fragmentMass = fragmentMassTotal / fragmentCount;
     const fragmentRadius = Math.max(radiusFromMass(fragmentMass, victim.density), MIN_FRAGMENT_RADIUS_M);
-    const speed = Math.sqrt(Math.max(result.specificImpactEnergy * 0.16, 1));
+    const escapeFraction = 0.45 + 0.55 * pseudoRandom(victim.id * 23.7 + i);
+    const severeEscapeBoost = severity > 3 ? clamp((severity - 3) * 0.12, 0, 0.45) : 0;
+    const speed = localEscape * Math.min(escapeFraction + severeEscapeBoost, 1.35);
     result.add.push(createFragment(
       victim,
       victim.x + dirX * (victim.radius + fragmentRadius),
@@ -575,6 +626,7 @@ function simulate(realDelta) {
     remaining -= step;
   }
 
+  updateFragmentSpin(realDelta);
   updateTrails();
 }
 
@@ -587,6 +639,12 @@ function updateTrails() {
       body.lastTrailY = body.y;
       while (body.trail.length > MAX_TRAIL_POINTS) body.trail.shift();
     }
+  }
+}
+
+function updateFragmentSpin(delta) {
+  for (const body of bodies) {
+    if (body.isFragment) body.angle += body.spin * delta;
   }
 }
 
@@ -647,6 +705,7 @@ function drawBackground() {
 }
 
 function drawTrail(body) {
+  if (body.isFragment) return;
   if (body.trail.length < 2) return;
   ctx.lineWidth = 1;
   for (let i = 1; i < body.trail.length; i++) {
@@ -669,6 +728,12 @@ function drawBody(body) {
   const base = mixColor(material.color, [255, 88, 16], heat);
   const dark = mixColor(base, [0, 0, 0], 0.35);
   const light = mixColor(base, [255, 255, 255], 0.45);
+
+  if (body.isFragment) {
+    drawFragmentBody(body, screen.x, screen.y, radius, base, dark);
+    if (body.selected) drawSelectionCorners(screen.x, screen.y, radius);
+    return;
+  }
 
   ctx.fillStyle = rgb(dark);
   ctx.beginPath();
@@ -701,6 +766,37 @@ function drawBody(body) {
   if (body.selected) {
     drawSelectionCorners(screen.x, screen.y, radius);
   }
+}
+
+function drawFragmentBody(body, x, y, radius, base, dark) {
+  const points = body.shape || makeFragmentShape(body.id);
+  ctx.fillStyle = rgb(dark);
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    const angle = point.angle + body.angle;
+    const rockRadius = radius * point.roughness;
+    const px = x + Math.cos(angle) * rockRadius;
+    const py = y + Math.sin(angle) * rockRadius;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = rgb(base);
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    const angle = point.angle + body.angle - 0.25;
+    const rockRadius = radius * point.roughness * 0.68;
+    const px = x - radius * 0.16 + Math.cos(angle) * rockRadius;
+    const py = y - radius * 0.18 + Math.sin(angle) * rockRadius;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
 }
 
 function drawSelectionCorners(x, y, radius) {
