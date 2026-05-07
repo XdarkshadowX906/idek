@@ -338,6 +338,7 @@
         fragmentShape: options.isFragment ? makeFragmentShape(nextBodyId * 17.17 + mass % 997) : null,
         rotation: Math.random() * TAU,
         spin: options.isFragment ? (Math.random() - 0.5) * 0.9 : 0,
+        collisionCooldown: options.collisionCooldown || 0,
         seed: Math.random() * 10_000
       };
     }
@@ -573,6 +574,112 @@
       primary.damage = Math.min(1, primary.damage + impactRatio * 0.18);
     }
 
+    function depositMass(primary, depositedMass, depositedVx, depositedVy, contactX, contactY, impactRatio) {
+      if (depositedMass <= 0) {
+        return;
+      }
+
+      const totalMass = primary.mass + depositedMass;
+      primary.vx = (primary.vx * primary.mass + depositedVx * depositedMass) / totalMass;
+      primary.vy = (primary.vy * primary.mass + depositedVy * depositedMass) / totalMass;
+      primary.mass = totalMass;
+      primary.radius = primary.type === "black hole" || primary.type === "white hole"
+        ? Math.max(primary.radius, schwarzschildRadius(primary.mass))
+        : radiusFromMass(totalMass, primary.density);
+      primary.heat = Math.min(1, primary.heat + 0.08 + impactRatio * 0.18);
+      primary.damage = Math.min(1, primary.damage + impactRatio * 0.09);
+      addCrater(primary, contactX, contactY, radiusFromMass(depositedMass, primary.density), impactRatio);
+    }
+
+    function separateOverlappingBodies(a, b, normalX, normalY, overlap) {
+      if (overlap <= 0) {
+        return;
+      }
+
+      const totalMass = a.mass + b.mass;
+      const moveA = overlap * (b.mass / totalMass);
+      const moveB = overlap * (a.mass / totalMass);
+      a.x -= normalX * moveA;
+      a.y -= normalY * moveA;
+      b.x += normalX * moveB;
+      b.y += normalY * moveB;
+    }
+
+    function reboundBodies(a, b, normalX, normalY, restitution) {
+      const relVx = b.vx - a.vx;
+      const relVy = b.vy - a.vy;
+      const normalVelocity = relVx * normalX + relVy * normalY;
+      if (normalVelocity > 0) {
+        return;
+      }
+
+      const impulse = -(1 + restitution) * normalVelocity / (1 / a.mass + 1 / b.mass);
+      a.vx -= normalX * impulse / a.mass;
+      a.vy -= normalY * impulse / a.mass;
+      b.vx += normalX * impulse / b.mass;
+      b.vy += normalY * impulse / b.mass;
+    }
+
+    function markCollisionCooldown(a, b, seconds = 1_200) {
+      a.collisionCooldown = Math.max(a.collisionCooldown || 0, seconds);
+      b.collisionCooldown = Math.max(b.collisionCooldown || 0, seconds);
+    }
+
+    function damageContact(a, b, contactX, contactY, severity, relativeSpeed) {
+      const clamped = Math.min(1.6, Math.max(0.04, severity));
+      addCrater(a, contactX, contactY, b.radius, clamped);
+      addCrater(b, contactX, contactY, a.radius, clamped);
+      a.damage = Math.min(1, a.damage + clamped * 0.08);
+      b.damage = Math.min(1, b.damage + clamped * 0.08);
+      const heat = Math.min(0.3, relativeSpeed / 70_000) * (0.4 + clamped * 0.25);
+      a.heat = Math.min(1, a.heat + heat);
+      b.heat = Math.min(1, b.heat + heat);
+    }
+
+    function excavateEjecta(target, impactor, outwardX, outwardY, severity, relativeSpeed) {
+      const ejecta = [];
+      if (severity < 0.18 || target.mass <= 0 || impactor.isFragment) {
+        return ejecta;
+      }
+
+      const tangentX = -outwardY;
+      const tangentY = outwardX;
+      const ejectaFraction = Math.min(0.018, Math.max(0.001, severity * 0.006));
+      const totalEjectaMass = Math.min(target.mass * ejectaFraction, impactor.mass * (0.15 + severity * 0.35));
+      if (totalEjectaMass <= 0) {
+        return ejecta;
+      }
+
+      target.mass -= totalEjectaMass;
+      target.radius = radiusFromMass(target.mass, target.density);
+      target.damage = Math.min(1, target.damage + severity * 0.12);
+      target.heat = Math.min(1, target.heat + severity * 0.08);
+
+      const count = Math.min(4, Math.max(1, Math.ceil(1 + severity * 1.5)));
+      const escape = escapeSpeed(target.mass, target.radius + impactor.radius);
+      for (let i = 0; i < count; i++) {
+        const mass = totalEjectaMass / count;
+        const fan = (i / Math.max(1, count - 1) - 0.5) * 1.6;
+        const dirX = outwardX * (0.65 + Math.random() * 0.3) + tangentX * fan;
+        const dirY = outwardY * (0.65 + Math.random() * 0.3) + tangentY * fan;
+        const length = Math.hypot(dirX, dirY) || 1;
+        const speed = Math.min(escape * (0.2 + Math.random() * 0.45), relativeSpeed * (0.08 + Math.random() * 0.18));
+        ejecta.push(makeRemnant(
+          target,
+          "excavated crust chunk",
+          mass,
+          target.x + dirX / length * (target.radius + MIN_FRAGMENT_RADIUS),
+          target.y + dirY / length * (target.radius + MIN_FRAGMENT_RADIUS),
+          target.vx + dirX / length * speed,
+          target.vy + dirY / length * speed,
+          Math.min(1, target.heat + 0.25 + severity * 0.12),
+          Math.min(1, target.damage + 0.25)
+        ));
+      }
+
+      return ejecta;
+    }
+
     function escapeSpeed(mass, distance) {
       return Math.sqrt(2 * G * mass / Math.max(distance, MIN_RADIUS));
     }
@@ -616,8 +723,9 @@
         heatColor: source.heatColor,
         heat,
         damage,
-        craters: source.craters,
-        isFragment
+        craters: isFragment ? [] : source.craters,
+        isFragment,
+        collisionCooldown: isFragment ? 2_400 : 900
       });
     }
 
@@ -706,7 +814,7 @@
       const tangentX = -normalY;
       const tangentY = normalX;
       const relSpeed = Math.hypot(projectile.vx - target.vx, projectile.vy - target.vy);
-      const accretedFraction = Math.max(0.12, Math.min(0.72, 0.42 / Math.max(0.5, qRatio)));
+      const accretedFraction = Math.max(0.04, Math.min(0.28, 0.16 / Math.max(0.5, qRatio)));
       let remainingMass = projectile.mass * (1 - accretedFraction);
       const localEscape = escapeSpeed(target.mass, target.radius + projectile.radius);
       const remnantFraction = qRatio > 1.2 ? 0.36 : 0.62;
@@ -776,6 +884,12 @@
 
       const normalX = dx / distance;
       const normalY = dy / distance;
+      const overlap = ra + rb - distance;
+      if ((a.collisionCooldown || 0) > 0 || (b.collisionCooldown || 0) > 0) {
+        separateOverlappingBodies(a, b, normalX, normalY, overlap + MIN_RADIUS);
+        return;
+      }
+
       const relVx = b.vx - a.vx;
       const relVy = b.vy - a.vy;
       const normalSpeed = Math.abs(relVx * normalX + relVy * normalY);
@@ -790,6 +904,8 @@
       const projectileSpecificEnergy = impactEnergy / Math.max(smaller.mass, 1);
       const targetSeverity = systemSpecificEnergy / disruptionThreshold(larger);
       const projectileSeverity = projectileSpecificEnergy / disruptionThreshold(smaller);
+      const severityA = impactEnergy / Math.max(a.mass, 1) / disruptionThreshold(a);
+      const severityB = impactEnergy / Math.max(b.mass, 1) / disruptionThreshold(b);
       const qRatio = Math.max(targetSeverity, projectileSeverity * Math.min(1, 4 / massRatio));
       const contactX = (a.x * rb + b.x * ra) / (ra + rb);
       const contactY = (a.y * rb + b.y * ra) / (ra + rb);
@@ -805,14 +921,35 @@
       if (
         smaller.isFragment &&
         massRatio >= FRAGMENT_REACCRETION_MASS_RATIO &&
-        targetSeverity < 0.75
+        targetSeverity < 1.2 &&
+        projectileSeverity < 2.0
       ) {
-        mergeBodies(larger, smaller, contactX, contactY, Math.min(1, projectileSeverity));
+        markCollisionCooldown(larger, smaller);
+        depositMass(larger, smaller.mass, smaller.vx, smaller.vy, contactX, contactY, Math.min(1, projectileSeverity));
         removeSet.add(smaller.id);
         return;
       }
 
+      if (a.isFragment || b.isFragment) {
+        markCollisionCooldown(a, b);
+        damageContact(a, b, contactX, contactY, Math.min(1, qRatio), relativeSpeed);
+        separateOverlappingBodies(a, b, normalX, normalY, overlap + MIN_RADIUS);
+        reboundBodies(a, b, normalX, normalY, 0.06);
+        return;
+      }
+
+      if (qRatio < 0.85) {
+        markCollisionCooldown(a, b);
+        damageContact(a, b, contactX, contactY, qRatio, relativeSpeed);
+        separateOverlappingBodies(a, b, normalX, normalY, overlap + MIN_RADIUS);
+        reboundBodies(a, b, normalX, normalY, Math.max(0.03, 0.32 - qRatio * 0.22));
+        additions.push(...excavateEjecta(a, b, -normalX, -normalY, severityA, relativeSpeed));
+        additions.push(...excavateEjecta(b, a, normalX, normalY, severityB, relativeSpeed));
+        return;
+      }
+
       if (massRatio > 8 && targetSeverity < 1.15 && projectileSeverity >= 0.2) {
+        markCollisionCooldown(larger, smaller, 1_800);
         const targetToProjectileX = (smaller.x - larger.x) / distance;
         const targetToProjectileY = (smaller.y - larger.y) / distance;
         const { debris, accretedMass } = makeProjectileDebris(
@@ -833,22 +970,32 @@
           smaller.heat,
           smaller.damage
         );
-        mergeBodies(larger, accretedShell, contactX, contactY, Math.min(1, targetSeverity + projectileSeverity * 0.08));
+        depositMass(
+          larger,
+          accretedShell.mass,
+          accretedShell.vx,
+          accretedShell.vy,
+          contactX,
+          contactY,
+          Math.min(1, targetSeverity + projectileSeverity * 0.08)
+        );
         larger.damage = Math.min(1, larger.damage + targetSeverity * 0.35);
         larger.heat = Math.min(1, larger.heat + targetSeverity * 0.45);
         removeSet.add(smaller.id);
+        additions.push(...excavateEjecta(larger, smaller, -targetToProjectileX, -targetToProjectileY, targetSeverity + 0.25, relativeSpeed));
         additions.push(...debris);
         return;
       }
 
-      if (qRatio < 0.85 || bodies.length > MAX_BODIES - 12) {
-        const primary = a.mass >= b.mass ? a : b;
-        const secondary = primary === a ? b : a;
-        mergeBodies(primary, secondary, contactX, contactY, Math.min(1, qRatio));
-        removeSet.add(secondary.id);
+      if (bodies.length > MAX_BODIES - 12) {
+        markCollisionCooldown(a, b);
+        damageContact(a, b, contactX, contactY, qRatio, relativeSpeed);
+        separateOverlappingBodies(a, b, normalX, normalY, overlap + MIN_RADIUS);
+        reboundBodies(a, b, normalX, normalY, 0.08);
         return;
       }
 
+      markCollisionCooldown(a, b, 2_400);
       const fragments = makeFragments(a, b, normalX, normalY, qRatio);
       removeSet.add(a.id);
       removeSet.add(b.id);
@@ -897,6 +1044,7 @@
         if (body.isFragment) {
           body.rotation += body.spin * Math.min(dt, 60);
         }
+        body.collisionCooldown = Math.max(0, (body.collisionCooldown || 0) - dt);
         for (const crater of body.craters) {
           crater.age = Math.max(0, crater.age - dt / 90_000_000);
         }
