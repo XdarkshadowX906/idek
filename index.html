@@ -154,6 +154,7 @@
     const MAX_FRAGMENTS_PER_IMPACT = 18;
     const MAX_SIM_STEP = 1_800;
     const FRAGMENT_REACCRETION_MASS_RATIO = 25;
+    const STARTUP_ZOOM = 5.0e-6;
 
     const materials = [
       {
@@ -348,61 +349,47 @@
       simTime = 0;
       camera.x = 0;
       camera.y = 0;
-      camera.zoom = 3.3e-8;
+      camera.zoom = STARTUP_ZOOM;
       camera.follow = false;
 
-      const sun = makeBody({
-        name: "sun analog",
-        type: "star",
-        material: materials[3],
-        mass: SOLAR_MASS,
-        radius: SOLAR_RADIUS,
-        x: 0,
-        y: 0,
-        color: "#ffd27a",
-        heatColor: "#fff0b0"
-      });
-
-      const earth = makeBody({
-        name: "earth analog",
+      const primary = makeBody({
+        name: "rocky proto-planet",
         type: "planet",
         material: materials[0],
-        mass: EARTH_MASS,
-        radius: EARTH_RADIUS,
-        x: AU,
-        y: 0,
-        vy: 29_780,
-        color: "#4f8bd6",
-        heatColor: "#ff955a"
+        radius: 2_500_000,
+        x: -18_000_000,
+        y: -1_200_000,
+        vx: 1_050,
+        vy: 120,
+        color: "#9f8064"
       });
 
-      const moon = makeBody({
-        name: "moon analog",
-        type: "planet",
-        material: materials[0],
-        mass: 7.342e22,
-        radius: 1_737_400,
-        x: AU + 384_400_000,
-        y: 0,
-        vy: 29_780 + 1_022,
-        color: "#aaa8a1",
-        heatColor: "#ffbe7c"
-      });
-
-      const iceBall = makeBody({
-        name: "icy minor body",
+      const secondary = makeBody({
+        name: "icy proto-planet",
         type: "planet",
         material: materials[2],
-        radius: 900_000,
-        x: AU * 1.62,
-        y: -AU * 0.18,
-        vx: 4_000,
-        vy: 23_500,
-        color: "#a2dcff"
+        radius: 2_050_000,
+        x: 18_000_000,
+        y: 1_200_000,
+        vx: -1_050,
+        vy: -120,
+        color: "#9bd8ff"
       });
 
-      bodies.push(sun, earth, moon, iceBall);
-      selectedId = earth.id;
+      const impactor = makeBody({
+        name: "rocky impactor",
+        type: "planet",
+        material: materials[0],
+        radius: 650_000,
+        x: -36_000_000,
+        y: 8_500_000,
+        vx: 2_350,
+        vy: -650,
+        color: "#a98765"
+      });
+
+      bodies.push(primary, secondary, impactor);
+      selectedId = primary.id;
     }
 
     function loadImpactDemo() {
@@ -1114,10 +1101,11 @@
     }
 
     function creationRadius(heldSeconds) {
-      const base = 120_000;
-      const growth = heldSeconds ** 1.65 * 1_400_000;
+      const visibleMinimum = 8 / camera.zoom;
+      const base = Math.max(250_000, visibleMinimum);
+      const growth = heldSeconds ** 1.45 * (3.5 / camera.zoom);
       const dragWorld = Math.hypot(pointer.worldX - pointer.downWorldX, pointer.worldY - pointer.downWorldY);
-      return Math.max(MIN_RADIUS, base + growth + dragWorld * 0.028);
+      return Math.max(MIN_RADIUS, base + growth + dragWorld * 0.018);
     }
 
     function draw() {
@@ -1229,9 +1217,9 @@
     function addCreatedBody() {
       const heldSeconds = Math.max(0, (performance.now() - pointer.downAt) / 1000);
       const radius = creationRadius(heldSeconds);
-      const velocityScale = 0.018;
-      const vx = (pointer.downWorldX - pointer.worldX) * velocityScale;
-      const vy = (pointer.downWorldY - pointer.worldY) * velocityScale;
+      const velocityScale = 35;
+      const vx = (pointer.downX - pointer.x) * velocityScale;
+      const vy = (pointer.downY - pointer.y) * velocityScale;
       const body = makeBody({
         type: typeNames[creationTypeIndex],
         material: materials[materialIndex],
@@ -1262,7 +1250,10 @@
     canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
     canvas.addEventListener("pointerdown", (event) => {
-      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      if (canvas.setPointerCapture && event.pointerId !== undefined) {
+        canvas.setPointerCapture(event.pointerId);
+      }
       updatePointer(event);
       pointer.button = event.button;
       pointer.downX = pointer.x;
@@ -1281,6 +1272,7 @@
     });
 
     canvas.addEventListener("pointermove", (event) => {
+      event.preventDefault();
       const previousWorld = { x: pointer.worldX, y: pointer.worldY };
       updatePointer(event);
       const screenMove = Math.hypot(pointer.x - pointer.downX, pointer.y - pointer.downY);
@@ -1297,6 +1289,7 @@
     });
 
     canvas.addEventListener("pointerup", (event) => {
+      event.preventDefault();
       updatePointer(event);
       if (pointer.draggingCreate && bodies.length < MAX_BODIES) {
         addCreatedBody();
@@ -1345,7 +1338,7 @@
       } else if (key === "r") {
         camera.x = 0;
         camera.y = 0;
-        camera.zoom = bodies.some((body) => body.type === "star") ? 3.3e-8 : 1.25e-6;
+        camera.zoom = bodies.some((body) => body.type === "star") ? 3.3e-8 : STARTUP_ZOOM;
         camera.follow = false;
       } else if (key === "5") {
         loadImpactDemo();
