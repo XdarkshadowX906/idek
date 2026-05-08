@@ -155,7 +155,7 @@
     const MAX_SIM_STEP = 1_800;
     const FRAGMENT_REACCRETION_MASS_RATIO = 25;
     const STARTUP_ZOOM = 5.0e-6;
-    const SURFACE_CELL_COUNT = 180;
+    const SURFACE_CELL_COUNT = 360;
     const MAX_IMPACT_EFFECTS = 28;
 
     const materials = [
@@ -595,8 +595,10 @@
         body.craters.shift();
       }
       damageSurfaceCells(body, angle, craterRadius / Math.max(body.radius, MIN_RADIUS), energyRatio);
-      addMoltenCracks(body, angle, craterRadius / Math.max(body.radius, MIN_RADIUS), energyRatio);
-      if (energyRatio > 0.22 && !body.isFragment) {
+      if (energyRatio > 1.4) {
+        addMoltenCracks(body, angle, craterRadius / Math.max(body.radius, MIN_RADIUS), energyRatio);
+      }
+      if (energyRatio > 0.9 && !body.isFragment) {
         addImpactPlume(body, angle, craterRadius, energyRatio);
       }
     }
@@ -926,6 +928,103 @@
       );
     }
 
+    function makeCellDebris(body, cell, cellMass, dirX, dirY, speed, heatBoost = 0.15) {
+      const length = Math.hypot(dirX, dirY) || 1;
+      return makeRemnant(
+        body,
+        "surface pixel debris",
+        cellMass,
+        body.x + cell.x * body.radius,
+        body.y + cell.y * body.radius,
+        body.vx + dirX / length * speed,
+        body.vy + dirY / length * speed,
+        Math.min(1, cell.heat + body.heat * 0.35 + heatBoost),
+        Math.min(1, cell.damage + 0.22)
+      );
+    }
+
+    function disperseImpactPixels(body, impactAngle, impactorRadius, severity, relativeSpeed, additions, catastrophic = false) {
+      if (!body.surfaceCells || body.surfaceCells.length === 0 || body.isFragment || body.type !== "planet") {
+        return 0;
+      }
+
+      const craterScale = Math.min(1.4, Math.max(0.06, impactorRadius / Math.max(body.radius, MIN_RADIUS)));
+      const angularWidth = catastrophic
+        ? Math.PI
+        : Math.min(Math.PI, 0.18 + craterScale * 1.7 + severity * 0.16);
+      const minRadius = catastrophic ? 0 : Math.max(0.34, 0.72 - craterScale * 0.45 - severity * 0.05);
+      const candidates = [];
+
+      for (let i = 0; i < body.surfaceCells.length; i++) {
+        const cell = body.surfaceCells[i];
+        const angular = Math.abs(angularDistance(cell.angle, impactAngle));
+        if (catastrophic || (angular <= angularWidth && cell.radius >= minRadius)) {
+          const angularScore = catastrophic ? 1 : 1 - angular / angularWidth;
+          const radialScore = catastrophic ? 1 : Math.max(0, (cell.radius - minRadius) / Math.max(0.001, 1 - minRadius));
+          const score = angularScore * 1.6 + radialScore + cell.damage * 1.2 + cell.heat * 0.8;
+          candidates.push({ index: i, cell, score });
+        }
+      }
+
+      if (candidates.length === 0) {
+        return 0;
+      }
+
+      candidates.sort((a, b) => b.score - a.score);
+      const localFraction = catastrophic
+        ? Math.min(0.96, 0.55 + severity * 0.08)
+        : Math.min(0.85, Math.max(0.04, severity * 0.1 + craterScale * 0.22));
+      const removeCount = Math.max(
+        catastrophic ? Math.floor(body.surfaceCells.length * 0.35) : 1,
+        Math.min(
+          candidates.length,
+          catastrophic ? 220 : 32,
+          Math.ceil(candidates.length * localFraction)
+        )
+      );
+      const selected = candidates.slice(0, removeCount).sort((a, b) => b.index - a.index);
+      const removed = selected.map((item) => body.surfaceCells.splice(item.index, 1)[0]);
+      const removedFraction = removed.length / Math.max(1, removed.length + body.surfaceCells.length);
+      const totalMassLoss = Math.min(body.mass * (catastrophic ? removedFraction : removedFraction * 0.42), body.mass * 0.72);
+      const cellMass = totalMassLoss / Math.max(1, removed.length);
+      const tangentX = -Math.sin(impactAngle);
+      const tangentY = Math.cos(impactAngle);
+      const outwardX = Math.cos(impactAngle);
+      const outwardY = Math.sin(impactAngle);
+      const escape = escapeSpeed(body.mass, body.radius);
+
+      for (let i = 0; i < removed.length && additions.length + bodies.length < MAX_BODIES; i++) {
+        const cell = removed[i];
+        const spread = angularDistance(cell.angle, impactAngle);
+        const dirX = outwardX * (0.8 + seededNoise(body.seed + i * 5.1) * 0.4) + tangentX * spread * 0.9;
+        const dirY = outwardY * (0.8 + seededNoise(body.seed + i * 5.1) * 0.4) + tangentY * spread * 0.9;
+        const speed = Math.min(
+          catastrophic ? escape * (0.28 + seededNoise(body.seed + i) * 0.55) : escape * (0.08 + seededNoise(body.seed + i) * 0.22),
+          relativeSpeed * (catastrophic ? 0.18 + seededNoise(body.seed + i * 2) * 0.2 : 0.05 + seededNoise(body.seed + i * 2) * 0.08)
+        );
+        additions.push(makeCellDebris(body, cell, cellMass, dirX, dirY, speed, catastrophic ? 0.5 : 0.18));
+      }
+
+      body.mass = Math.max(body.mass - totalMassLoss, body.mass * 0.08);
+      body.radius = radiusFromMass(body.mass, body.density);
+      body.damage = Math.min(1, body.damage + removedFraction * (catastrophic ? 1.2 : 0.55));
+      body.heat = Math.min(1, body.heat + removedFraction * (catastrophic ? 0.9 : 0.35));
+      if (body.surfaceCells.length < 18 || (catastrophic && body.surfaceCells.length < SURFACE_CELL_COUNT * 0.16)) {
+        body.fracture = null;
+      }
+
+      return removed.length;
+    }
+
+    function disperseWholePlanet(body, impactAngle, relativeSpeed, additions) {
+      const removed = disperseImpactPixels(body, impactAngle, body.radius * 2, 8, relativeSpeed, additions, true);
+      if (removed > 0) {
+        body.damage = 1;
+        body.heat = Math.min(1, body.heat + 0.65);
+      }
+      return removed;
+    }
+
     function processProgressiveFractures(dt) {
       const additions = [];
       for (const body of bodies) {
@@ -934,12 +1033,12 @@
         }
 
         body.fracture.timer += dt;
-        const interval = Math.max(90, 360 - Math.min(260, (body.fracture.speed || 0) / 140));
+        const interval = Math.max(480, 1_200 - Math.min(700, (body.fracture.speed || 0) / 60));
         let shedCount = 0;
         while (
           body.fracture &&
           body.fracture.timer >= interval &&
-          shedCount < 3 &&
+          shedCount < 1 &&
           bodies.length + additions.length < MAX_BODIES
         ) {
           body.fracture.timer -= interval;
@@ -1271,8 +1370,8 @@
         damageContact(a, b, contactX, contactY, qRatio, relativeSpeed);
         separateOverlappingBodies(a, b, normalX, normalY, overlap + MIN_RADIUS);
         reboundBodies(a, b, normalX, normalY, Math.max(0.03, 0.32 - qRatio * 0.22));
-        additions.push(...excavateEjecta(a, b, -normalX, -normalY, severityA, relativeSpeed));
-        additions.push(...excavateEjecta(b, a, normalX, normalY, severityB, relativeSpeed));
+        disperseImpactPixels(a, Math.atan2(a.y - b.y, a.x - b.x), b.radius, severityA, relativeSpeed, additions);
+        disperseImpactPixels(b, Math.atan2(b.y - a.y, b.x - a.x), a.radius, severityB, relativeSpeed, additions);
         return;
       }
 
@@ -1325,8 +1424,22 @@
 
       markCollisionCooldown(a, b, 3_600);
       damageContact(a, b, contactX, contactY, Math.min(2, qRatio), relativeSpeed);
-      startProgressiveFracture(a, Math.atan2(a.y - b.y, a.x - b.x), -normalX, -normalY, severityA + qRatio * 0.35, relativeSpeed);
-      startProgressiveFracture(b, Math.atan2(b.y - a.y, b.x - a.x), normalX, normalY, severityB + qRatio * 0.35, relativeSpeed);
+      const angleA = Math.atan2(a.y - b.y, a.x - b.x);
+      const angleB = Math.atan2(b.y - a.y, b.x - a.x);
+      const breakupA = severityA + qRatio * 0.35;
+      const breakupB = severityB + qRatio * 0.35;
+      if (breakupA > 4.2 || qRatio > 7) {
+        disperseWholePlanet(a, angleA, relativeSpeed, additions);
+      } else {
+        disperseImpactPixels(a, angleA, b.radius, breakupA, relativeSpeed, additions);
+        startProgressiveFracture(a, angleA, -normalX, -normalY, breakupA, relativeSpeed);
+      }
+      if (breakupB > 4.2 || qRatio > 7) {
+        disperseWholePlanet(b, angleB, relativeSpeed, additions);
+      } else {
+        disperseImpactPixels(b, angleB, a.radius, breakupB, relativeSpeed, additions);
+        startProgressiveFracture(b, angleB, normalX, normalY, breakupB, relativeSpeed);
+      }
       separateOverlappingBodies(a, b, normalX, normalY, overlap + MIN_RADIUS * 8);
       reboundBodies(a, b, normalX, normalY, 0.02);
     }
@@ -1535,8 +1648,6 @@
       ctx.beginPath();
       ctx.arc(0, 0, bodyRadius, 0, TAU);
       ctx.clip();
-      ctx.fillStyle = colorString(mixColorArray(base, dark, 0.55));
-      ctx.fillRect(-bodyRadius, -bodyRadius, bodyRadius * 2, bodyRadius * 2);
 
       for (const cell of body.surfaceCells) {
         const x = cell.x * bodyRadius;
