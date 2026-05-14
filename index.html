@@ -102,10 +102,10 @@ const C = 299792458;
 const METERS_PER_PIXEL = 1.0e6;
 const MAX_STEP_SECONDS = 900;
 const SOFTENING_METERS = 750;
-const MAX_TRAIL_POINTS = 90;
+const MAX_TRAIL_POINTS = 45;
 const MIN_FRAGMENT_RADIUS_M = 5.0e4;
-const MAX_FRAGMENTS = 10;
-const MAX_BODIES = 160;
+const MAX_FRAGMENTS = 6;
+const MAX_BODIES = 90;
 const COLLISION_CELL_SIZE_M = 8.0e6;
 const FRAGMENT_REACCRETION_MASS_RATIO = 25;
 const CREATE_MIN_RADIUS_M = 4.5e5;
@@ -294,6 +294,7 @@ function createBody(name, x, y, vx, vy, radius, materialType, isFragment = false
     shape: isFragment ? makeFragmentShape(nextBodyId) : null,
     spin: isFragment ? randomRange(-0.7, 0.7) : 0,
     angle: isFragment ? randomRange(0, Math.PI * 2) : 0,
+    breakupCooldown: 0,
     selected: false
   };
   if (addToWorld) bodies.push(body);
@@ -560,6 +561,12 @@ function solveCollision(a, b, distance, dx, dy) {
     disruptionThreshold
   };
 
+  if ((a.breakupCooldown || 0) > 0 || (b.breakupCooldown || 0) > 0) {
+    separateBodies(a, b, nx, ny);
+    bounceBodies(a, b, nx, ny, 0.04);
+    return result;
+  }
+
   if (a.kind === "white_hole" || b.kind === "white_hole") {
     whiteHoleRepel(a.kind === "white_hole" ? a : b, a.kind === "white_hole" ? b : a, nx, ny, result);
     return result;
@@ -715,9 +722,9 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   // Severe impacts strip mass from the victim progressively. The original body
   // remains as the largest remnant instead of disappearing in one frame.
   const originalMass = victim.mass;
-  const strippedMass = originalMass * clamp(0.12 + severity * 0.06, 0.16, 0.58);
-  const immediateAccretionMass = strippedMass * clamp(0.08 / Math.max(severity, 1), 0.02, 0.12);
-  const remnantMassTotal = strippedMass * clamp(0.55 - severity * 0.04, 0.25, 0.55);
+  const strippedMass = originalMass * clamp(0.04 + severity * 0.025, 0.06, 0.22);
+  const immediateAccretionMass = strippedMass * clamp(0.05 / Math.max(severity, 1), 0.01, 0.08);
+  const remnantMassTotal = strippedMass * clamp(0.66 - severity * 0.035, 0.38, 0.66);
   const ejectaMassTotal = Math.max(strippedMass - immediateAccretionMass - remnantMassTotal, 0);
   const localEscape = escapeSpeedFrom(survivor, survivor.radius + victim.radius);
 
@@ -725,10 +732,13 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   victim.radius = radiusFromMass(victim.mass, victim.density);
   victim.damage = clamp((victim.damage || 0) + 0.22 + severity * 0.08, 0, 0.98);
   victim.temperature += energy * 0.18 / Math.max(victim.mass * victim.heatCapacity, 1);
+  victim.breakupCooldown = 2.5;
+  victim.x = survivor.x + outward.x * (survivor.radius + victim.radius + 1);
+  victim.y = survivor.y + outward.y * (survivor.radius + victim.radius + 1);
   addCrater(victim, outward.x, outward.y, 1);
 
   const majorRemnantFractions = [0.45, 0.27, 0.16, 0.08];
-  const majorCount = severity > 3 ? 3 : 2;
+  const majorCount = severity > 3 ? 2 : 1;
   let usedRemnantMass = 0;
   for (let i = 0; i < majorCount; i++) {
     const massFraction = majorRemnantFractions[i];
@@ -757,7 +767,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
 
   const leftoverRemnantMass = Math.max(remnantMassTotal - usedRemnantMass, 0);
   const smallEjectaMassTotal = ejectaMassTotal + leftoverRemnantMass;
-  const ejectaCount = clamp(Math.ceil(3 + severity), 3, MAX_FRAGMENTS);
+  const ejectaCount = clamp(Math.ceil(2 + severity * 0.6), 2, MAX_FRAGMENTS);
   for (let i = 0; i < ejectaCount; i++) {
     const angle = Math.atan2(outward.y, outward.x) + randomRange(-1.15, 1.15);
     const dirX = Math.cos(angle);
@@ -799,6 +809,18 @@ function bounceBodies(a, b, nx, ny, restitution) {
   b.vy += ny * impulse / b.mass;
 }
 
+function separateBodies(a, b, nx, ny) {
+  const overlap = (a.radius + b.radius) - Math.hypot(b.x - a.x, b.y - a.y);
+  if (overlap <= 0) return;
+  const totalMass = a.mass + b.mass;
+  const moveA = overlap * (b.mass / totalMass);
+  const moveB = overlap * (a.mass / totalMass);
+  a.x -= nx * moveA;
+  a.y -= ny * moveA;
+  b.x += nx * moveB;
+  b.y += ny * moveB;
+}
+
 function simulate(realDelta) {
   if (paused) return;
   let remaining = realDelta * timeScale;
@@ -828,6 +850,9 @@ function updateTrails() {
 function updateFragmentSpin(delta) {
   for (const body of bodies) {
     if (body.isFragment) body.angle += body.spin * delta;
+    if ((body.breakupCooldown || 0) > 0) {
+      body.breakupCooldown = Math.max(0, body.breakupCooldown - delta);
+    }
   }
 }
 
