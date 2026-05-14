@@ -711,19 +711,29 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   const outward = outwardFrom(survivor, victim, nx, ny);
   addCrater(survivor, -outward.x, -outward.y, 1);
   addHeat(survivor, energy * 0.12);
-  result.remove.push(victim);
 
-  const immediateAccretionMass = victim.mass * clamp(0.04 / Math.max(severity, 1), 0.01, 0.06);
-  const remnantMassTotal = victim.mass * clamp(0.78 - severity * 0.06, 0.42, 0.78);
-  const ejectaMassTotal = Math.max(victim.mass - immediateAccretionMass - remnantMassTotal, 0);
+  // Severe impacts strip mass from the victim progressively. The original body
+  // remains as the largest remnant instead of disappearing in one frame.
+  const originalMass = victim.mass;
+  const strippedMass = originalMass * clamp(0.12 + severity * 0.06, 0.16, 0.58);
+  const immediateAccretionMass = strippedMass * clamp(0.08 / Math.max(severity, 1), 0.02, 0.12);
+  const remnantMassTotal = strippedMass * clamp(0.55 - severity * 0.04, 0.25, 0.55);
+  const ejectaMassTotal = Math.max(strippedMass - immediateAccretionMass - remnantMassTotal, 0);
   const localEscape = escapeSpeedFrom(survivor, survivor.radius + victim.radius);
 
+  victim.mass = Math.max(originalMass - strippedMass, originalMass * 0.08);
+  victim.radius = radiusFromMass(victim.mass, victim.density);
+  victim.damage = clamp((victim.damage || 0) + 0.22 + severity * 0.08, 0, 0.98);
+  victim.temperature += energy * 0.18 / Math.max(victim.mass * victim.heatCapacity, 1);
+  addCrater(victim, outward.x, outward.y, 1);
+
   const majorRemnantFractions = [0.45, 0.27, 0.16, 0.08];
-  const majorCount = severity > 3 ? 4 : 3;
+  const majorCount = severity > 3 ? 3 : 2;
   let usedRemnantMass = 0;
   for (let i = 0; i < majorCount; i++) {
     const massFraction = majorRemnantFractions[i];
     const remnantMass = remnantMassTotal * massFraction;
+    if (remnantMass <= 0) continue;
     usedRemnantMass += remnantMass;
     const angle = Math.atan2(outward.y, outward.x) + (i - (majorCount - 1) * 0.5) * 0.75 + randomRange(-0.18, 0.18);
     const dirX = Math.cos(angle);
@@ -774,6 +784,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   survivor.vy = (survivor.vy * survivor.mass + victim.vy * immediateAccretionMass) / totalMass;
   survivor.mass = totalMass;
   survivor.radius = radiusFromMass(survivor.mass, survivor.density);
+  result.primary = victim;
 }
 
 function bounceBodies(a, b, nx, ny, restitution) {
