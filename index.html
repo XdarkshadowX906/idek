@@ -102,13 +102,13 @@ const C = 299792458;
 const METERS_PER_PIXEL = 1.0e6;
 const MAX_STEP_SECONDS = 900;
 const SOFTENING_METERS = 750;
-const MAX_TRAIL_POINTS = 45;
+const MAX_TRAIL_POINTS = 25;
 const MIN_FRAGMENT_RADIUS_M = 5.0e4;
-const MAX_FRAGMENTS = 4;
-const MAX_BODIES = 60;
-const MAX_COLLISIONS_PER_STEP = 12;
-const MAX_NEW_BODIES_PER_STEP = 10;
-const MAX_SIM_STEPS_PER_FRAME = 3;
+const MAX_FRAGMENTS = 2;
+const MAX_BODIES = 35;
+const MAX_COLLISIONS_PER_STEP = 4;
+const MAX_NEW_BODIES_PER_STEP = 4;
+const MAX_SIM_STEPS_PER_FRAME = 1;
 const COLLISION_CELL_SIZE_M = 8.0e6;
 const FRAGMENT_REACCRETION_MASS_RATIO = 25;
 const CREATE_MIN_RADIUS_M = 4.5e5;
@@ -445,6 +445,19 @@ function computeAccelerations() {
       if (dist <= 0) continue;
       const nx = dx / dist;
       const ny = dy / dist;
+      if (a.isFragment && b.isFragment) continue;
+      if (a.isFragment && !b.isFragment) {
+        const accelA = G * gravityMass(b) / distSq;
+        a.ax += nx * accelA;
+        a.ay += ny * accelA;
+        continue;
+      }
+      if (!a.isFragment && b.isFragment) {
+        const accelB = G * gravityMass(a) / distSq;
+        b.ax -= nx * accelB;
+        b.ay -= ny * accelB;
+        continue;
+      }
       const accelA = G * gravityMass(b) / distSq;
       const accelB = G * gravityMass(a) / distSq;
       a.ax += nx * accelA;
@@ -748,7 +761,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   addCrater(victim, outward.x, outward.y, 1);
 
   const majorRemnantFractions = [0.45, 0.27, 0.16, 0.08];
-  const majorCount = 1;
+  const majorCount = severity > 4 ? 1 : 0;
   let usedRemnantMass = 0;
   for (let i = 0; i < majorCount; i++) {
     const massFraction = majorRemnantFractions[i];
@@ -777,7 +790,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
 
   const leftoverRemnantMass = Math.max(remnantMassTotal - usedRemnantMass, 0);
   const smallEjectaMassTotal = ejectaMassTotal + leftoverRemnantMass;
-  const ejectaCount = clamp(Math.ceil(1 + severity * 0.35), 1, MAX_FRAGMENTS);
+  const ejectaCount = clamp(Math.ceil(1 + severity * 0.25), 1, MAX_FRAGMENTS);
   for (let i = 0; i < ejectaCount; i++) {
     const angle = Math.atan2(outward.y, outward.x) + randomRange(-1.15, 1.15);
     const dirX = Math.cos(angle);
@@ -952,6 +965,7 @@ function drawBackground() {
 
 function drawTrail(body) {
   if (body.isFragment) return;
+  if (body !== selectedBody) return;
   if (body.trail.length < 2) return;
   ctx.lineWidth = 1;
   for (let i = 1; i < body.trail.length; i++) {
