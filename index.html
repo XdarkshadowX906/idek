@@ -104,8 +104,11 @@ const MAX_STEP_SECONDS = 900;
 const SOFTENING_METERS = 750;
 const MAX_TRAIL_POINTS = 45;
 const MIN_FRAGMENT_RADIUS_M = 5.0e4;
-const MAX_FRAGMENTS = 6;
-const MAX_BODIES = 90;
+const MAX_FRAGMENTS = 4;
+const MAX_BODIES = 60;
+const MAX_COLLISIONS_PER_STEP = 12;
+const MAX_NEW_BODIES_PER_STEP = 10;
+const MAX_SIM_STEPS_PER_FRAME = 3;
 const COLLISION_CELL_SIZE_M = 8.0e6;
 const FRAGMENT_REACCRETION_MASS_RATIO = 25;
 const CREATE_MIN_RADIUS_M = 4.5e5;
@@ -474,13 +477,16 @@ function resolveCollisions() {
   const additions = [];
   const checkedPairs = new Set();
   const grid = buildCollisionGrid();
+  let collisionCount = 0;
 
+  outer:
   for (let i = 0; i < bodies.length; i++) {
     const a = bodies[i];
     if (removed.has(a)) continue;
     const nearby = nearbyCollisionCandidates(a, grid);
     for (const b of nearby) {
       if (a === b || removed.has(b)) continue;
+      if (a.isFragment && b.isFragment) continue;
       const lowId = Math.min(a.id, b.id);
       const highId = Math.max(a.id, b.id);
       const pairKey = `${lowId}:${highId}`;
@@ -493,7 +499,11 @@ function resolveCollisions() {
       if (distance <= a.radius + b.radius) {
         const result = solveCollision(a, b, distance || 1, dx, dy);
         for (const body of result.remove) removed.add(body);
-        additions.push(...result.add);
+        for (const body of result.add) {
+          if (additions.length < MAX_NEW_BODIES_PER_STEP) additions.push(body);
+        }
+        collisionCount++;
+        if (collisionCount >= MAX_COLLISIONS_PER_STEP || additions.length >= MAX_NEW_BODIES_PER_STEP) break outer;
         if (removed.has(a)) break;
       }
     }
@@ -738,7 +748,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
   addCrater(victim, outward.x, outward.y, 1);
 
   const majorRemnantFractions = [0.45, 0.27, 0.16, 0.08];
-  const majorCount = severity > 3 ? 2 : 1;
+  const majorCount = 1;
   let usedRemnantMass = 0;
   for (let i = 0; i < majorCount; i++) {
     const massFraction = majorRemnantFractions[i];
@@ -767,7 +777,7 @@ function catastrophicShatter(a, b, nx, ny, severity, energy, result, victimOverr
 
   const leftoverRemnantMass = Math.max(remnantMassTotal - usedRemnantMass, 0);
   const smallEjectaMassTotal = ejectaMassTotal + leftoverRemnantMass;
-  const ejectaCount = clamp(Math.ceil(2 + severity * 0.6), 2, MAX_FRAGMENTS);
+  const ejectaCount = clamp(Math.ceil(1 + severity * 0.35), 1, MAX_FRAGMENTS);
   for (let i = 0; i < ejectaCount; i++) {
     const angle = Math.atan2(outward.y, outward.x) + randomRange(-1.15, 1.15);
     const dirX = Math.cos(angle);
@@ -824,11 +834,13 @@ function separateBodies(a, b, nx, ny) {
 function simulate(realDelta) {
   if (paused) return;
   let remaining = realDelta * timeScale;
-  while (remaining > 0) {
+  let steps = 0;
+  while (remaining > 0 && steps < MAX_SIM_STEPS_PER_FRAME) {
     const step = Math.min(remaining, MAX_STEP_SECONDS);
     integrateLeapfrog(step);
     resolveCollisions();
     remaining -= step;
+    steps++;
   }
 
   updateFragmentSpin(realDelta);
